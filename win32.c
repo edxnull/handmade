@@ -30,7 +30,7 @@
 */
 
 #define BPP 4
-#define PI32 3.14159265359
+#define PI 3.14159265359
 
 struct win32_offscreen_buffer {
     int width;
@@ -43,6 +43,16 @@ struct win32_offscreen_buffer {
 struct win32_window_dimension {
     int width;
     int height;
+};
+
+struct win32_sound_output {
+    int SamplesPerSecond;
+    int ToneHz;
+    int square_wave_period;
+    int BytesPerSample;
+    int SecondaryBufferSize;
+    int16_t tone_volume;
+    uint32_t running_sample_index;
 };
 
 static int global_running;
@@ -72,7 +82,7 @@ static void win32_init_direct_sound(HWND Window, int32_t SamplesPerSecond, int32
         LPDIRECTSOUND DirectSound;
         if (SUCCEEDED(DirectSoundCreate(0, &DirectSound, 0))) {
             WAVEFORMATEX WaveFormat;
-            memset(&WaveFormat, 0, sizeof(WaveFormat));
+            memset(&WaveFormat, 0, sizeof(WAVEFORMATEX));
 
             WaveFormat.wFormatTag = WAVE_FORMAT_PCM;
             WaveFormat.nChannels = 2;
@@ -84,7 +94,7 @@ static void win32_init_direct_sound(HWND Window, int32_t SamplesPerSecond, int32
 
             if (SUCCEEDED(IDirectSound_SetCooperativeLevel(DirectSound, Window, DSSCL_PRIORITY))) {
                 DSBUFFERDESC BufferDescription;
-                memset(&BufferDescription, 0, sizeof(BufferDescription));
+                memset(&BufferDescription, 0, sizeof(DSBUFFERDESC));
                 BufferDescription.dwSize = sizeof(BufferDescription);
                 BufferDescription.dwFlags = DSBCAPS_PRIMARYBUFFER;
 
@@ -96,7 +106,7 @@ static void win32_init_direct_sound(HWND Window, int32_t SamplesPerSecond, int32
                 } else { /* diagnostics */}
             } else {}
             DSBUFFERDESC BufferDescription;
-            memset(&BufferDescription, 0, sizeof(BufferDescription));
+            memset(&BufferDescription, 0, sizeof(DSBUFFERDESC));
 
             BufferDescription.dwSize = sizeof(BufferDescription);
             BufferDescription.dwFlags = 0;
@@ -222,11 +232,49 @@ LRESULT CALLBACK WindowProc(HWND Window, UINT Message, WPARAM WParam, LPARAM LPa
     return result;
 }
 
+static void win32_fill_sound_buffer(struct win32_sound_output *soundout, DWORD ByteToLock, DWORD BytesToWrite)
+{
+
+    VOID *R01;
+    VOID *R02;
+    DWORD R01_size;
+    DWORD R02_size;
+
+    if (SUCCEEDED(IDirectSoundBuffer_Lock(globalDSSecondaryBuffer, ByteToLock, BytesToWrite,
+                                                            &R01, &R01_size, &R02, &R02_size, 0))) {
+        int16_t *SampleOut;
+        DWORD SampleIndex;
+
+        SampleOut = (int16_t *)R01;
+        DWORD R01_sample_count = R01_size / soundout->BytesPerSample;
+        for (SampleIndex = 0; SampleIndex < R01_sample_count; ++SampleIndex) {
+            float t = 2.0l * PI * ((float)(soundout->running_sample_index) / (float)(soundout->square_wave_period));
+            float sineval = sinf(t);
+            int16_t sample_val = (int16_t)(sineval * soundout->tone_volume);
+            *SampleOut++ = sample_val;
+            *SampleOut++ = sample_val;
+            ++soundout->running_sample_index;
+        }
+
+        SampleOut = (int16_t *)R02;
+        DWORD R02_sample_count = R02_size / soundout->BytesPerSample;
+        for (SampleIndex = 0; SampleIndex < R02_sample_count; ++SampleIndex) {
+            float t = 2.0l * PI * ((float)(soundout->running_sample_index) / (float)(soundout->square_wave_period));
+            float sineval = sinf(t);
+                int16_t sample_val = (int16_t)(sineval * soundout->tone_volume);
+                *SampleOut++ = sample_val;
+                *SampleOut++ = sample_val;
+                ++soundout->running_sample_index;
+            }
+            IDirectSoundBuffer_Unlock(globalDSSecondaryBuffer, R01, R01_size, R02, R02_size);
+        }
+}
+
 int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
     WNDCLASSA WindowClass;
 
-    memset(&WindowClass, 0, sizeof(WindowClass));
+    memset(&WindowClass, 0, sizeof(WNDCLASSA));
 
     // TODO: our best size is 1009 to 486 instead of 1280 to 720
     win32_ResizeDIBsect(&globalbackbuffer, 1009, 486);
@@ -254,19 +302,20 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
             int xoffset = 0;
             int yoffset = 0;
 
-            int SamplesPerSecond = 44100;
-            int ToneHz = 256; // middle C value
-            int square_wave_period = SamplesPerSecond/ToneHz;
-            int half_square_wave_period = square_wave_period / 2;
-            int BytesPerSample = sizeof(int16_t)*2;
-            int SecondaryBufferSize = SamplesPerSecond*BytesPerSample;
-            int sound_is_playing = 0;
-            int16_t tone_volume = 1000;
-            uint32_t running_sample_index = 0;
+            struct win32_sound_output soundout;
+            memset(&soundout, 0, sizeof(struct win32_sound_output));
+            soundout.SamplesPerSecond = 44100;
+            soundout.ToneHz = 440;
+            soundout.square_wave_period = soundout.SamplesPerSecond / soundout.ToneHz;
+            soundout.BytesPerSample = sizeof(int16_t) * 2;
+            soundout.SecondaryBufferSize = soundout.SamplesPerSecond * soundout.BytesPerSample;
+            soundout.tone_volume = 3000;
+            soundout.running_sample_index = 0;
+            win32_init_direct_sound(Window, soundout.SamplesPerSecond, soundout.SecondaryBufferSize);
+            win32_fill_sound_buffer(&soundout, 0, soundout.SecondaryBufferSize);
+            IDirectSoundBuffer_Play(globalDSSecondaryBuffer, 0, 0, DSBPLAY_LOOPING);
 
             global_running = 1;
-
-            win32_init_direct_sound(Window, SamplesPerSecond, SecondaryBufferSize);
 
             QueryPerformanceFrequency(&frequency);
             QueryPerformanceCounter(&starting_time);
@@ -283,7 +332,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
 
                 // Platform independent!!
                 struct game_offscreen_buffer game_buffer;
-                memset(&game_buffer, 0, sizeof(game_buffer));
+                memset(&game_buffer, 0, sizeof(struct game_offscreen_buffer));
                 game_buffer.memory = globalbackbuffer.memory;
                 game_buffer.width = globalbackbuffer.width;
                 game_buffer.height = globalbackbuffer.height;
@@ -291,56 +340,23 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
                 game_update_and_render(&game_buffer, xoffset, yoffset);
                 // Platform independent!!
 
+                // sound!
                 DWORD PlayCursor;
                 DWORD WriteCursor;
                 if (SUCCEEDED(IDirectSoundBuffer_GetCurrentPosition(globalDSSecondaryBuffer, &PlayCursor, &WriteCursor))) {
 
-                    DWORD ByteToLock = (running_sample_index*BytesPerSample) % SecondaryBufferSize;
+                    DWORD ByteToLock = (soundout.running_sample_index*soundout.BytesPerSample) % soundout.SecondaryBufferSize;
                     DWORD BytesToWrite;
 
-                    if (ByteToLock == PlayCursor) {
-                        BytesToWrite = SecondaryBufferSize;
-                    } else if (ByteToLock > PlayCursor) {
-                        BytesToWrite = (SecondaryBufferSize - ByteToLock);
+                    if (ByteToLock > PlayCursor) {
+                        BytesToWrite = (soundout.SecondaryBufferSize - ByteToLock);
                         BytesToWrite += PlayCursor;
                     } else {
                         BytesToWrite = PlayCursor - ByteToLock;
                     }
-
-                    VOID *R01; //region
-                    DWORD R01_size;
-
-                    VOID *R02; //region
-                    DWORD R02_size;
-
-                    if (SUCCEEDED(IDirectSoundBuffer_Lock(globalDSSecondaryBuffer, ByteToLock, BytesToWrite,
-                                                                            &R01, &R01_size, &R02, &R02_size, 0))) {
-                        int16_t *SampleOut;
-                        DWORD SampleIndex;
-
-                        SampleOut = (int16_t *)R01;
-                        DWORD R01_sample_count = R01_size / BytesPerSample;
-                        for (SampleIndex = 0; SampleIndex < R01_sample_count; ++SampleIndex) {
-                            int16_t sample_val = ((running_sample_index++ / half_square_wave_period) % 2) ? tone_volume : -tone_volume;
-                            *SampleOut++ = sample_val;
-                            *SampleOut++ = sample_val;
-                        }
-
-                        SampleOut = (int16_t *)R02;
-                        DWORD R02_sample_count = R02_size / BytesPerSample;
-                        for (SampleIndex = 0; SampleIndex < R02_sample_count; ++SampleIndex) {
-                            int16_t sample_val = ((running_sample_index++ / half_square_wave_period) % 2) ? tone_volume : -tone_volume;
-                            *SampleOut++ = sample_val;
-                            *SampleOut++ = sample_val;
-                        }
-                        IDirectSoundBuffer_Unlock(globalDSSecondaryBuffer, R01, R01_size, R02, R02_size);
-                    }
+                    win32_fill_sound_buffer(&soundout, ByteToLock, BytesToWrite);
                 }
-
-                if (!sound_is_playing) {
-                    IDirectSoundBuffer_Play(globalDSSecondaryBuffer, 0, 0, DSBPLAY_LOOPING);
-                    sound_is_playing = 1;
-                }
+                // sound!
 
                 HDC DeviceContext = GetDC(Window);
                 struct win32_window_dimension dim = win32_get_window_dimension(Window);
